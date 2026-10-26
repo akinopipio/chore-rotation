@@ -19,6 +19,19 @@
     border-radius: 10px; padding: 8px 14px; cursor: pointer; }
   button:hover { border-color: var(--accent); }
   .themes { display: flex; gap: 12px; margin-bottom: 22px; }
+  .restock h2 { margin-bottom: 4px; }
+  .restock h4 { margin: 18px 0 8px; font-size: 15px; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; }
+  .duty { color: #cfdcdc; margin: 0 0 6px; }
+  .chips { display: flex; flex-wrap: wrap; gap: 8px; }
+  .chip { border-radius: 999px; padding: 6px 14px; font-size: 14px; }
+  .items { margin-top: 8px; }
+  .item { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 10px 0; border-top: 1px solid var(--line); }
+  .item .hint { margin: 2px 0 0; }
+  .item.low b { color: #f0b36a; }
+  .iact { display: flex; gap: 6px; align-items: center; flex: none; }
+  .chip.low { background: #d98a1f; border-color: #d98a1f; color: #fff; }
+  #itemsEdit { background: #0d1517; color: var(--text); border: 1px solid var(--line); border-radius: 8px; padding: 8px; font: inherit; width: 100%; }
+  .adm { margin: 18px 0 0; font-size: 16px; }
   .sync { color: var(--muted); font-size: 13px; min-height: 18px; margin: -12px 0 12px; }
   .sync.bad { color: #f0b36a; }
   .dot { width: 36px; height: 36px; border-radius: 50%; border: 3px solid transparent; padding: 0; }
@@ -103,6 +116,7 @@
 
   <div class="people" id="people"></div>
   <div class="chores" id="chores"></div>
+  <section class="rules restock" id="restock"></section>
 
   <section class="rules">
     <h2>House rules for everyone</h2>
@@ -139,6 +153,9 @@
     <summary>Admin: edit the whole page</summary>
     <p class="hint">Edit chores below. “Start” decides who does the chore the first time (monthly chores can also have a start date: the week that date falls in is turn 1) (0 = Sofi, 1 = Vale, 2 = Nico, 3 = Ya Ching); the doer moves one person each time it comes around.</p>
     <div id="editor"></div>
+    <h3 class="adm">Restock items</h3>
+    <p class="hint">One item per line. New items start with Sofi + Vale; use the ⇄ button on the item to change whose turn it is.</p>
+    <textarea id="itemsEdit" rows="7"></textarea>
     <div class="row">
       <button id="addChore">+ Add chore</button>
       <button id="resetAll">Reset everything</button>
@@ -165,9 +182,17 @@ const DEFAULT_CHORES = [
   { f: "m", k: 2, p: 0, o: 2, s: "2026-10-19", t: "Trash bins handover", d: "Once every 2 months, starting the week of Oct 19: hand the trash bins duty over to the next person." },
 ];
 const KEY = "chore-rotation-v5";
+const DEFAULT_ITEMS = ["Toilet paper", "Detergent", "Kitchen paper", "Sponge", "Jet Dry liquid", "Clorox", "Surface disinfectant", "Dish soap", "Salt / Pepper"];
+// turn[item] = which team buys it next (0 = Sofi + Vale, 1 = Nico + Ya Ching). Used until the sheet has its own value.
+const DEFAULT_TURNS = { "Toilet paper": 1, "Detergent": 0, "Kitchen paper": 0, "Sponge": 0, "Jet Dry liquid": 1, "Clorox": 0, "Surface disinfectant": 1, "Dish soap": 0, "Salt / Pepper": 1 };
+const DEFAULT_LB = { "Toilet paper": { team: 0, date: "" }, "Detergent": { team: 1, date: "" }, "Kitchen paper": { team: 1, date: "" }, "Sponge": { team: 1, date: "" } };
+const defaultTurns = () => Object.assign({}, DEFAULT_TURNS);
+const defaultLb = () => JSON.parse(JSON.stringify(DEFAULT_LB));
 let S;
 try { S = JSON.parse(localStorage.getItem(KEY)); } catch (e) {}
 S = Object.assign({ chores: DEFAULT_CHORES, done: {}, status: {}, strikes: {}, overrides: {}, theme: 0 }, S || {});
+if (!S.restock) S.restock = {};
+S.restock = Object.assign({ items: DEFAULT_ITEMS.slice(), low: {}, turn: defaultTurns(), lb: defaultLb() }, S.restock);
 // ---- Sync with Google Sheets (via the Apps Script web app in sheets-sync.gs) ----
 // Paste your web app URL between the quotes. Leave empty to keep data only in this browser.
 const SYNC_URL = "https://script.google.com/macros/s/AKfycbyQ1Ve3zSxdcHv3rzVEXaHEoRE5PcxLbvSfnuZfVtBO5A2pw1AjbML-tH70GkbXrzEZ/exec";
@@ -186,11 +211,16 @@ function flatten() {
   for (const [w, st] of Object.entries(S.status)) for (const [i, v] of Object.entries(st || {})) if (v) m[`away:${w}:${i}`] = "1";
   for (const [i, v] of Object.entries(S.strikes)) if (v) m["strike:" + i] = String(v);
   for (const [k, v] of Object.entries(S.overrides)) m["ov:" + k] = JSON.stringify(v);
+  m.items = JSON.stringify(S.restock.items);
+  for (const [k, v] of Object.entries(S.restock.turn)) m["turn:" + k] = String(v);
+  for (const [k, v] of Object.entries(S.restock.lb)) m["lb:" + k] = JSON.stringify(v);
+  for (const k of Object.keys(S.restock.low)) if (S.restock.low[k]) m["low:" + k] = "1";
   return m;
 }
 function applyRemote(m) {
   const n = { done: {}, status: {}, strikes: {}, overrides: {} };
   let chores = S.chores;
+  const r = { items: S.restock.items, low: {}, turn: defaultTurns(), lb: defaultLb() };   // sheet values win over these defaults
   for (const [k, v] of Object.entries(m)) {
     if (v === "" || v == null) continue;
     try {
@@ -199,9 +229,13 @@ function applyRemote(m) {
       else if (k.startsWith("away:")) { const [, w, i] = k.split(":"); (n.status[w] = n.status[w] || {})[i] = "away"; }
       else if (k.startsWith("strike:")) n.strikes[k.slice(7)] = +v;
       else if (k.startsWith("ov:")) n.overrides[k.slice(3)] = JSON.parse(v);
+      else if (k === "items") r.items = JSON.parse(v);
+      else if (k.startsWith("turn:")) r.turn[k.slice(5)] = +v;
+      else if (k.startsWith("lb:")) r.lb[k.slice(3)] = JSON.parse(v);
+      else if (k.startsWith("low:")) r.low[k.slice(4)] = true;
     } catch (e) {}
   }
-  Object.assign(S, n, { chores });
+  Object.assign(S, n, { chores, restock: r });
 }
 function setSyncStatus(t, bad) {
   const el = document.getElementById("sync"); if (!el) return;
@@ -305,6 +339,36 @@ function favors(i) {
   return out.length ? `<div class="favors">${out.join("<br>")}</div>` : "";
 }
 
+// ---- Restock: each item rotates between the two teams ----
+const TEAMS = [[0, 1], [2, 3]];                       // Sofi + Vale, Nico + Ya Ching
+const teamName = t => TEAMS[t].map(i => PEOPLE[i]).join(" + ");
+const itemTeam = n => (S.restock.turn[n] === 1 ? 1 : 0);
+
+function renderRestock() {
+  const ta = document.getElementById("itemsEdit");
+  if (ta && document.activeElement !== ta) ta.value = S.restock.items.join("\n");
+  const el = document.getElementById("restock"); if (!el) return;
+  const R = S.restock, lowItems = R.items.filter(n => R.low[n]);
+  const shopping = [0, 1].map(t => {
+    const list = lowItems.filter(n => itemTeam(n) === t);
+    return list.length ? `<div class="duty"><b>${esc(teamName(t))} to buy:</b> ${list.map(esc).join(", ")}</div>` : "";
+  }).join("");
+  el.innerHTML = `
+    <h2>Restock</h2>
+    <p class="hint">Each item takes turns between the two teams. Running out of something? Tap “Running low”. The team named on it buys it, taps “Bought it”, and next time it's the other team's turn.</p>
+    ${shopping || `<p class="hint">Nothing is running low right now.</p>`}
+    <div class="items">${R.items.map(n => {
+      const low = !!R.low[n], t = itemTeam(n), lb = R.lb[n];
+      return `<div class="item ${low ? "low" : ""}">
+        <div class="iname"><b>${esc(n)}</b>
+          <div class="hint">Next: ${esc(teamName(t))}${lb ? ` · Last bought: ${esc(teamName(lb.team))}${lb.date ? ", " + esc(lb.date) : ""}` : ""}</div></div>
+        <div class="iact">${low
+          ? `<button class="chip low" data-bought="${esc(n)}">Bought it</button><button class="mini" data-low="${esc(n)}" aria-label="Not low">✕</button>`
+          : `<button class="chip" data-low="${esc(n)}">Running low</button><button class="mini" data-flip="${esc(n)}" title="Swap whose turn it is">⇄</button>`}</div>
+      </div>`;
+    }).join("")}</div>`;
+}
+
 function render() {
   document.documentElement.style.setProperty("--accent", THEMES[S.theme]);
   document.getElementById("themes").innerHTML = THEMES.map((c, i) =>
@@ -356,6 +420,8 @@ function render() {
     </div>`;
   }).join("");
 
+  renderRestock();
+
   const ed = document.getElementById("editor");
   if (!ed.contains(document.activeElement)) {
     ed.innerHTML = S.chores.map((c, i) => `<div class="edit ${c.f === "m" ? "has-date" : ""}">
@@ -372,6 +438,14 @@ document.addEventListener("click", e => {
   const b = e.target.closest("button"); if (!b) return;
   const w = weekIdx(monday);
   if (b.dataset.t) S.theme = +b.dataset.t;
+  else if (b.dataset.low !== undefined) { const n = b.dataset.low; if (S.restock.low[n]) delete S.restock.low[n]; else S.restock.low[n] = true; }
+  else if (b.dataset.bought !== undefined) {
+    const n = b.dataset.bought, t = itemTeam(n), d = new Date();
+    delete S.restock.low[n];
+    S.restock.turn[n] = 1 - t;
+    S.restock.lb[n] = { team: t, date: d.toLocaleDateString("en-US", { month: "short", day: "numeric" }) };
+  }
+  else if (b.dataset.flip !== undefined) { const n = b.dataset.flip; S.restock.turn[n] = 1 - itemTeam(n); }
   else if (b.dataset.undo) delete S.overrides[b.dataset.undo];
   else if (b.dataset.pay) { const a = assignments()[b.dataset.pay]; S.overrides[a.dk] = { who: +b.dataset.by, owner: a.owner }; }
   else if (b.dataset.away) {
@@ -385,7 +459,7 @@ document.addEventListener("click", e => {
   else if (b.dataset.del) { S.chores.splice(+b.dataset.del, 1); document.getElementById("editor").innerHTML = ""; }
   else if (b.id === "resetAll") {
     if (!confirm("Reset all chores, ticks, away weeks and strikes?")) return;
-    S = { chores: DEFAULT_CHORES, done: {}, status: {}, strikes: {}, overrides: {}, theme: 0 };
+    S = { chores: DEFAULT_CHORES, done: {}, status: {}, strikes: {}, overrides: {}, theme: 0, restock: { items: DEFAULT_ITEMS.slice(), low: {}, turn: defaultTurns(), lb: defaultLb() } };
   } else return;
   save(); render();
 });
@@ -399,6 +473,7 @@ document.addEventListener("change", e => {
   if (c !== undefined) { S.done[assignments()[c].dk] = e.target.checked; save(); render(); }
 });
 document.addEventListener("input", e => {
+  if (e.target.id === "itemsEdit") { S.restock.items = e.target.value.split("\n").map(x => x.trim()).filter(Boolean); save(); renderRestock(); return; }
   const i = e.target.dataset.e; if (i === undefined) return;
   const f = e.target.dataset.f;
   if (f === "fp") { const v = e.target.value; S.chores[i].f = v[0]; if (v[0] === "m") { S.chores[i].k = +v[1]; S.chores[i].p = +v[2] || 0; } else S.chores[i].p = +v[1] || 0; save(); render(); return; }
